@@ -18,8 +18,11 @@ def extract_chart_context(page):
 
     for block in blocks:
         y_top = block[1]
-        if y_top < page_height * 0.4:
-            context.append(block[4])
+        text = block[4]
+
+        # Only upper-middle region
+        if page_height * 0.1 < y_top < page_height * 0.35:
+            context.append(text)
 
     return " ".join(context)
 
@@ -138,7 +141,10 @@ def detect_bars(page):
                 # Ignore thin lines
                 page_height = page.rect.height
 
-                if width < 5 or height < page_height * 0.02:
+                if width < page.rect.width * 0.01:
+                    continue
+
+                if height < page.rect.height * 0.05:
                     continue
 
 
@@ -154,27 +160,28 @@ def detect_bars(page):
 
 def infer_scale(y_ticks):
     """
-    Infer pixel-to-value scale from Y-axis tick labels.
-    Corrected for PDF coordinate system.
+    Robust scale inference using lowest and highest tick values.
+    Handles inverted axes safely.
     """
     if len(y_ticks) < 2:
         return None
 
-    # Sort by Y position (top → bottom)
+    # Sort by pixel Y (top = small y, bottom = large y)
     y_sorted = sorted(y_ticks, key=lambda t: t["y"])
 
     top_tick = y_sorted[0]
     bottom_tick = y_sorted[-1]
 
     pixel_range = bottom_tick["y"] - top_tick["y"]
-    value_range = top_tick["value"] - bottom_tick["value"]
 
     if pixel_range == 0:
         return None
 
+    value_range = bottom_tick["value"] - top_tick["value"]
+
     scale = value_range / pixel_range
 
-    return scale, bottom_tick["value"], bottom_tick["y"]
+    return scale, top_tick["value"], top_tick["y"]
 
 
 
@@ -197,18 +204,27 @@ def extract_charts(pdf_path, document_id):
         if not scale_data:
             continue
 
-        scale, bottom_value, bottom_pixel = scale_data
+        scale, top_tick_value, top_tick_pixel = scale_data
 
         bars_sorted = sorted(bars, key=lambda b: b["x_center"])
 
         for index, bar in enumerate(bars_sorted):
 
-            # 🔥 Use TOP of bar
-            pixel_height = bottom_pixel - bar["y_top"]
+            # Distance from top tick to bar top
+            pixel_delta = bar["y_top"] - top_tick_pixel
 
-            value = pixel_height * scale
+            value = top_tick_value + (pixel_delta * scale)
+
             
             year = match_year(bar["x_center"], x_years)
+
+            # ---- Sanity Filtering ----
+            if value < 0:
+                continue
+
+            if value < 1 and scale > 1:
+                continue
+
 
             metrics.append({
                 "document_id": document_id,
