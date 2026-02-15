@@ -96,6 +96,11 @@ def extract_axis_labels(page):
                         })
                     except ValueError:
                         continue
+        # Keep only ticks close to leftmost X
+        if y_ticks:
+            min_x = min(t["x"] for t in y_ticks)
+            y_ticks = [t for t in y_ticks if abs(t["x"] - min_x) < 15]
+
 
     return y_ticks, x_years
 
