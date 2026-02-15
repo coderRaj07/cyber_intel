@@ -11,6 +11,18 @@ NUMERIC_PATTERN = re.compile(r"^\d+(\.\d+)?$")
 def is_numeric(text):
     return bool(NUMERIC_PATTERN.match(text.strip()))
 
+def extract_chart_context(page):
+    blocks = page.get_text("blocks")
+    page_height = page.rect.height
+    context = []
+
+    for block in blocks:
+        y_top = block[1]
+        if y_top < page_height * 0.4:
+            context.append(block[4])
+
+    return " ".join(context)
+
 
 def extract_axis_labels(page):
     """
@@ -98,6 +110,15 @@ def extract_axis_labels(page):
 #                     })
 
 #     return y_ticks, x_years
+def match_year(bar_x, x_years):
+    if not x_years:
+        return None
+
+    closest = min(
+        x_years,
+        key=lambda y: abs(y["x"] - bar_x)
+    )
+    return closest["year"]
 
 
 def detect_bars(page):
@@ -115,8 +136,11 @@ def detect_bars(page):
                 height = abs(rect.y1 - rect.y0)
 
                 # Ignore thin lines
-                if width < 5 or height < 10:
+                page_height = page.rect.height
+
+                if width < 5 or height < page_height * 0.02:
                     continue
+
 
                 bars.append({
                     "x_center": (rect.x0 + rect.x1) / 2,
@@ -131,24 +155,27 @@ def detect_bars(page):
 def infer_scale(y_ticks):
     """
     Infer pixel-to-value scale from Y-axis tick labels.
+    Corrected for PDF coordinate system.
     """
     if len(y_ticks) < 2:
         return None
 
-    # Sort by vertical position
-    y_ticks_sorted = sorted(y_ticks, key=lambda t: t["y"])
+    # Sort by Y position (top → bottom)
+    y_sorted = sorted(y_ticks, key=lambda t: t["y"])
 
-    top = y_ticks_sorted[0]
-    bottom = y_ticks_sorted[-1]
+    top_tick = y_sorted[0]
+    bottom_tick = y_sorted[-1]
 
-    pixel_range = abs(bottom["y"] - top["y"])
-    value_range = abs(bottom["value"] - top["value"])
+    pixel_range = bottom_tick["y"] - top_tick["y"]
+    value_range = top_tick["value"] - bottom_tick["value"]
 
     if pixel_range == 0:
         return None
 
     scale = value_range / pixel_range
-    return scale, bottom["value"], bottom["y"]
+
+    return scale, bottom_tick["value"], bottom_tick["y"]
+
 
 
 def extract_charts(pdf_path, document_id):
@@ -157,6 +184,7 @@ def extract_charts(pdf_path, document_id):
     metrics = []
 
     for page_number, page in enumerate(doc, start=1):
+        page_text = extract_chart_context(page)
 
         y_ticks, x_years = extract_axis_labels(page)
         bars = detect_bars(page)
@@ -169,30 +197,30 @@ def extract_charts(pdf_path, document_id):
         if not scale_data:
             continue
 
-        scale, base_value, base_pixel = scale_data
+        scale, bottom_value, bottom_pixel = scale_data
 
-        # Sort bars by X position (left to right)
         bars_sorted = sorted(bars, key=lambda b: b["x_center"])
 
         for index, bar in enumerate(bars_sorted):
 
-            # Map bar height to value
-            value = base_value - (bar["y_bottom"] - base_pixel) * scale
+            # 🔥 Use TOP of bar
+            pixel_height = bottom_pixel - bar["y_top"]
 
-            year = None
-            if index < len(x_years):
-                year = x_years[index]["year"]
+            value = pixel_height * scale
+            
+            year = match_year(bar["x_center"], x_years)
 
             metrics.append({
                 "document_id": document_id,
-                "metric_key": "chart_metric",
+                "metric_key": None,  # 🔥 let classifier decide
                 "value": round(value, 2),
                 "unit": "inferred",
                 "year": year,
                 "source_type": "chart_vector",
                 "page_number": page_number,
-                "confidence_score": 0.85,
-                "raw_text": "vector_bar_extracted"
+                "confidence_score": 0.75,  # slightly lower before classification
+                "raw_text": page_text  # 🔥 pass full chart context
             })
 
+    doc.close()
     return metrics

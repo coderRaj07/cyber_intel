@@ -3,15 +3,18 @@ import re
 from app.schema.taxonomy import CANONICAL_TAXONOMY
 
 
-YEAR_PATTERN = re.compile(r"20\d{2}")
+YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 NUMERIC_PATTERN = re.compile(r"^-?\d[\d,]*\.?\d*$")
+
+
+def clean_numeric(value: str):
+    return value.replace(",", "").strip()
 
 
 def is_numeric(value: str):
     if not value:
         return False
-    value = value.replace(",", "").strip()
-    return bool(NUMERIC_PATTERN.match(value))
+    return bool(NUMERIC_PATTERN.match(clean_numeric(value)))
 
 
 def detect_header_rows(table):
@@ -35,8 +38,8 @@ def merge_headers(header_rows):
     if not header_rows:
         return []
 
-    merged = []
     num_cols = max(len(r) for r in header_rows)
+    merged = []
 
     for col_index in range(num_cols):
         parts = []
@@ -48,34 +51,28 @@ def merge_headers(header_rows):
     return merged
 
 
-def normalize_header(header):
-    if not header:
-        return ""
-    return header.lower().replace("\n", " ").strip()
+def infer_metric_key_from_header(header_text, table_context=""):
+    text = (header_text + " " + table_context).lower()
 
-
-def infer_metric_key(header_text):
-    lower = header_text.lower()
-
-    if "employment" in lower or "employees" in lower:
+    if "employment" in text or "employees" in text or "jobs" in text:
         return "employment"
 
-    if "firm" in lower or "company" in lower:
+    if "firm" in text or "company" in text or "providers" in text:
         return "company_count"
 
-    if "revenue" in lower:
+    if "revenue" in text:
         return "revenue_eur"
 
-    if "gva" in lower or "gross value" in lower:
+    if "gva" in text or "gross value" in text:
         return "gross_value_added"
 
-    if "investment" in lower:
+    if "investment" in text:
         return "investment"
 
-    if "growth" in lower or "%" in lower:
+    if "growth" in text or "%" in text:
         return "growth_rate"
 
-    return "table_metric"
+    return None
 
 
 def extract_tables(pdf_path, document_id):
@@ -91,6 +88,8 @@ def extract_tables(pdf_path, document_id):
             if not tables:
                 continue
 
+            page_text = page.extract_text() or ""
+
             for table in tables:
 
                 if not table or len(table) < 2:
@@ -101,28 +100,53 @@ def extract_tables(pdf_path, document_id):
 
                 data_rows = table[len(header_rows):]
 
+                # Detect if first column is a year column
+                first_col_year = False
+                for row in data_rows[:3]:
+                    if row and YEAR_PATTERN.search(str(row[0])):
+                        first_col_year = True
+                        break
+
                 for row in data_rows:
+
+                    if not row:
+                        continue
+
+                    row_year = None
+
+                    # If first column contains year
+                    if first_col_year:
+                        year_match = YEAR_PATTERN.search(str(row[0]))
+                        if year_match:
+                            row_year = int(year_match.group())
 
                     for col_index, cell in enumerate(row):
 
                         if not cell:
                             continue
 
-                        value = str(cell).replace(",", "").strip()
+                        cell_str = str(cell).strip()
 
-                        if not is_numeric(value):
+                        # Skip year column value
+                        if first_col_year and col_index == 0:
                             continue
 
-                        numeric_value = float(value)
+                        if not is_numeric(cell_str):
+                            continue
+
+                        numeric_value = float(clean_numeric(cell_str))
 
                         header_text = ""
                         if col_index < len(headers):
-                            header_text = normalize_header(headers[col_index])
+                            header_text = headers[col_index]
 
-                        metric_key = infer_metric_key(header_text)
+                        metric_key = infer_metric_key_from_header(
+                            header_text,
+                            table_context=page_text
+                        )
 
-                        year_match = YEAR_PATTERN.search(header_text)
-                        year = int(year_match.group()) if year_match else None
+                        if not metric_key:
+                            continue
 
                         unit = CANONICAL_TAXONOMY.get(
                             metric_key,
@@ -134,11 +158,11 @@ def extract_tables(pdf_path, document_id):
                             "metric_key": metric_key,
                             "value": numeric_value,
                             "unit": unit,
-                            "year": year,
+                            "year": row_year,
                             "source_type": "table",
                             "page_number": page_number,
-                            "confidence_score": 0.9,
-                            "raw_text": str(row)
+                            "confidence_score": 0.92,
+                            "raw_text": f"{headers} | {row}"
                         })
 
     return metrics

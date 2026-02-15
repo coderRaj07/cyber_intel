@@ -31,9 +31,14 @@ def run_pipeline(pdf_path, document_id):
 
         raw_text = metric.get("raw_text", "")
 
-        predicted_key, similarity = classify_metric_semantically(raw_text)
+        original_key = metric.get("metric_key")
 
-        metric["metric_key"] = predicted_key
+        if original_key in [None, "table_metric"]:
+            predicted_key, similarity = classify_metric_semantically(raw_text)
+            metric["metric_key"] = predicted_key
+        else:
+            similarity = 1.0 # structured extraction confidence
+
         metric = map_to_taxonomy(metric)
 
         metric["confidence_score"] = compute_confidence(
