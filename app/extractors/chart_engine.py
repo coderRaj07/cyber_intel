@@ -12,10 +12,9 @@ def is_numeric(text):
     return bool(NUMERIC_PATTERN.match(text.strip()))
 
 
-# ---------------------------------------------------
-# CHART TITLE / CONTEXT
-# ---------------------------------------------------
-
+# -------------------------------------------------
+# Extract chart title / context (upper-middle zone)
+# -------------------------------------------------
 def extract_chart_context(page):
     blocks = page.get_text("blocks")
     page_height = page.rect.height
@@ -25,22 +24,27 @@ def extract_chart_context(page):
         y_top = block[1]
         text = block[4]
 
-        # Middle-upper region only (avoid headers & footers)
-        if page_height * 0.15 < y_top < page_height * 0.40:
+        if page_height * 0.1 < y_top < page_height * 0.35:
             context.append(text)
 
     return " ".join(context)
 
 
-# ---------------------------------------------------
-# AXIS EXTRACTION
-# ---------------------------------------------------
-
+# -------------------------------------------------
+# Extract Y-axis ticks and X-axis years
+# -------------------------------------------------
 def extract_axis_labels(page):
+    """
+    Extract clean Y-axis ticks and X-axis years.
+    Removes header/footer contamination.
+    """
 
     text_dict = page.get_text("dict")
     y_ticks = []
     x_years = []
+
+    page_height = page.rect.height
+    page_width = page.rect.width
 
     for block in text_dict["blocks"]:
         if block["type"] != 0:
@@ -53,71 +57,70 @@ def extract_axis_labels(page):
                 if not text:
                     continue
 
-                # -------- YEAR EXTRACTION --------
-                if YEAR_PATTERN.fullmatch(text):
-                    year = int(text)
+                x0 = span["bbox"][0]
+                y0 = span["bbox"][1]
+
+                # ----------------------------
+                # 1️⃣ STRICT YEAR DETECTION
+                # ----------------------------
+                year_match = YEAR_PATTERN.fullmatch(text)
+                if year_match:
+                    year = int(year_match.group())
                     if 1990 <= year <= 2035:
                         x_years.append({
                             "year": year,
-                            "x": span["bbox"][0],
-                            "y": span["bbox"][1]
+                            "x": x0,
+                            "y": y0
                         })
                     continue
 
-                # -------- Y TICK EXTRACTION --------
+                # ----------------------------
+                # 2️⃣ STRICT Y-AXIS TICK FILTER
+                # ----------------------------
                 if is_numeric(text):
 
-                        # Only left margin
-                        if span["bbox"][0] > page.rect.width * 0.15:
-                            continue
+                    # Must be LEFT EDGE (true axis region)
+                    if x0 > page_width * 0.10:
+                        continue
 
+                    # Must be in middle vertical region (not header/footer)
+                    if not (page_height * 0.15 < y0 < page_height * 0.85):
+                        continue
+
+                    try:
                         value = float(text.replace(",", ""))
-
-                        # 🚨 Remove page numbers (usually top of page)
-                        if span["bbox"][1] < page.rect.height * 0.08:
-                            continue
-
-                        # 🚨 Remove extreme large values (like 58, 59 page numbers)
-                        if value > 1000:
-                            continue
-
                         y_ticks.append({
                             "value": value,
-                            "x": span["bbox"][0],
-                            "y": span["bbox"][1]
+                            "x": x0,
+                            "y": y0
                         })
+                    except ValueError:
+                        continue
+
+    return y_ticks, x_years
+
+# -------------------------------------------------
+# Match bar to nearest year label
+# -------------------------------------------------
+def match_year(bar_x, x_years):
+    if not x_years:
+        return None
+
+    closest = min(
+        x_years,
+        key=lambda y: abs(y["x"] - bar_x)
+    )
+    return closest["year"]
 
 
-    # 🔥 SORT & FILTER MONOTONIC TICKS
-    y_ticks = sorted(y_ticks, key=lambda t: t["y"])
-
-    filtered_ticks = []
-    for tick in y_ticks:
-        if not filtered_ticks:
-            filtered_ticks.append(tick)
-            continue
-
-        # Only keep realistic incremental ticks
-        if abs(tick["value"] - filtered_ticks[-1]["value"]) <= 50:
-            filtered_ticks.append(tick)
-
-    return filtered_ticks, x_years
-
-
-# ---------------------------------------------------
-# BAR DETECTION
-# ---------------------------------------------------
-
+# -------------------------------------------------
+# Detect bars from vector rectangles
+# -------------------------------------------------
 def detect_bars(page):
-
     bars = []
-    drawings = page.get_drawings()
-    page_height = page.rect.height
-    page_width = page.rect.width
 
-    for drawing in drawings:
+    for drawing in page.get_drawings():
         for item in drawing["items"]:
-
             if item[0] != "re":
                 continue
 
@@ -125,15 +128,10 @@ def detect_bars(page):
             width = abs(rect.x1 - rect.x0)
             height = abs(rect.y1 - rect.y0)
 
-            # 🔥 Ignore tiny shapes
-            if width < page_width * 0.01:
+            # Filter tiny shapes
+            if width < page.rect.width * 0.01:
                 continue
-
-            if height < page_height * 0.05:
-                continue
-
-            # 🔥 Ignore full-page background rectangles
-            if height > page_height * 0.8:
+            if height < page.rect.height * 0.05:
                 continue
 
             bars.append({
@@ -146,89 +144,65 @@ def detect_bars(page):
     return bars
 
 
-# ---------------------------------------------------
-# SCALE INFERENCE
-# ---------------------------------------------------
-
-def infer_scale(y_ticks):
+# -------------------------------------------------
+# Infer pixel-to-value scale
+# -------------------------------------------------
+def infer_scale(y_ticks, page_height):
     """
-    Production-grade axis detection:
-    - Remove page numbers
-    - Keep only proper monotonic sequence
-    - Require minimum 4 ticks
+    Industrial-grade scale detection.
+    Keeps only true vertical axis ticks.
     """
 
     if len(y_ticks) < 4:
         return None
 
-    # 1️⃣ Remove duplicates
-    unique = {}
-    for tick in y_ticks:
-        val = tick["value"]
-        if val not in unique or tick["y"] > unique[val]["y"]:
-            unique[val] = tick
+    # 1️⃣ Keep only left-most ticks (true Y-axis)
+    left_axis = sorted(y_ticks, key=lambda t: t["x"])[:8]
 
-    ticks = list(unique.values())
+    # 2️⃣ Remove header/footer noise by Y clustering
+    # Keep ticks that are vertically grouped
+    left_axis = sorted(left_axis, key=lambda t: t["y"])
 
-    # 2️⃣ Sort by pixel position (top → bottom)
-    ticks.sort(key=lambda t: t["y"])
+    values = [t["value"] for t in left_axis]
 
-    # 3️⃣ Extract numeric sequence
-    values = [t["value"] for t in ticks]
-
-    # 4️⃣ Detect dominant step size
-    diffs = []
-    for i in range(1, len(values)):
-        diffs.append(abs(values[i] - values[i - 1]))
+    # 3️⃣ Compute differences
+    diffs = [
+        round(values[i+1] - values[i], 2)
+        for i in range(len(values)-1)
+    ]
 
     if not diffs:
         return None
 
-    # Most common difference
+    # 4️⃣ Detect dominant step
     step = max(set(diffs), key=diffs.count)
 
-    # 5️⃣ Keep only values matching that step
-    filtered = [ticks[0]]
+    # 5️⃣ Keep only consistent-step ticks
+    cleaned = [left_axis[0]]
 
-    for i in range(1, len(ticks)):
-        if abs(ticks[i]["value"] - filtered[-1]["value"]) == step:
-            filtered.append(ticks[i])
+    for i in range(1, len(left_axis)):
+        if round(values[i] - values[i-1], 2) == step:
+            cleaned.append(left_axis[i])
 
-    if len(filtered) < 4:
+    if len(cleaned) < 3:
         return None
 
-    top_tick = filtered[0]
-    bottom_tick = filtered[-1]
+    top_tick = cleaned[0]
+    bottom_tick = cleaned[-1]
 
     pixel_range = bottom_tick["y"] - top_tick["y"]
-    value_range = bottom_tick["value"] - top_tick["value"]
-
     if pixel_range == 0:
         return None
+
+    value_range = bottom_tick["value"] - top_tick["value"]
 
     scale = value_range / pixel_range
 
     return scale, top_tick["value"], top_tick["y"]
 
-# ---------------------------------------------------
-# MATCH YEAR TO BAR
-# ---------------------------------------------------
-
-def match_year(bar_x, x_years):
-    if not x_years:
-        return None
-
-    closest = min(
-        x_years,
-        key=lambda y: abs(y["x"] - bar_x)
-    )
-    return closest["year"]
-
-
-# ---------------------------------------------------
-# MAIN CHART EXTRACTION
-# ---------------------------------------------------
-
+# -------------------------------------------------
+# MAIN EXTRACTION FUNCTION
+# -------------------------------------------------
 def extract_charts(pdf_path, document_id):
 
     doc = fitz.open(pdf_path)
@@ -241,7 +215,8 @@ def extract_charts(pdf_path, document_id):
         y_ticks, x_years = extract_axis_labels(page)
         bars = detect_bars(page)
 
-        if not bars or not y_ticks:
+        # Skip non-chart pages
+        if len(y_ticks) < 5 or len(bars) < 1:
             continue
 
         logger.warning(f"\n--- PAGE {page_number} ---")
@@ -249,15 +224,16 @@ def extract_charts(pdf_path, document_id):
         logger.warning(f"X YEARS: {x_years}")
         logger.warning(f"BARS: {bars}")
 
-        scale_data = infer_scale(y_ticks)
+        scale_data = infer_scale(y_ticks, page.rect.height)
         if not scale_data:
             continue
 
         scale, top_tick_value, top_tick_pixel = scale_data
 
-        # 🔥 SORT & REMOVE DUPLICATE BARS
+        # Sort bars left to right
         bars_sorted = sorted(bars, key=lambda b: b["x_center"])
 
+        # Remove near-duplicate bars
         unique_bars = []
         for bar in bars_sorted:
             if not unique_bars:
@@ -267,22 +243,18 @@ def extract_charts(pdf_path, document_id):
             if abs(bar["x_center"] - unique_bars[-1]["x_center"]) > 3:
                 unique_bars.append(bar)
 
-        bars_sorted = unique_bars
-
-        for bar in bars_sorted:
+        for bar in unique_bars:
 
             pixel_delta = bar["y_top"] - top_tick_pixel
             value = top_tick_value + (pixel_delta * scale)
 
-            # 🔥 Sanity Filtering
+            # Sanity filtering
             if value < 0:
                 continue
-
-            if abs(value) > 1_000_000_000:
+            if value > 100000:
                 continue
 
             year = match_year(bar["x_center"], x_years)
-
 
             metrics.append({
                 "document_id": document_id,
