@@ -1,23 +1,22 @@
 import json
 import re
 from app.services.llm_client import call_cerebras
-
-
 def numeric_exists_in_text(value, original_text):
     """
-    Prevent hallucinations by ensuring extracted number
-    exists exactly in original text.
+    Strict numeric token validation.
+    Only accept exact numeric tokens present in text.
     """
 
     if value is None:
         return False
 
-    # Normalize
-    normalized_text = original_text.replace(",", "")
+    # Extract all numeric tokens from original text
+    tokens = re.findall(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\b", original_text)
+
+    normalized_tokens = [t.replace(",", "") for t in tokens]
     normalized_value = str(value).replace(",", "")
 
-    return normalized_value in normalized_text
-
+    return normalized_value in normalized_tokens
 
 def extract_metrics(block_text: str, page_number: int, report_name: str):
 
@@ -62,9 +61,31 @@ def extract_metrics(block_text: str, page_number: int, report_name: str):
     for m in metrics:
         value = m.get("value")
         source_text = m.get("source_text", "")
+        metric_name = m.get("metric_name", "")
+        unit = m.get("unit", "")
 
-        # Validate numeric anchor
+        # 1️⃣ Must exist exactly in original block
         if not numeric_exists_in_text(value, block_text):
+            continue
+
+        # 2️⃣ Reject very small standalone numbers without economic context
+        if isinstance(value, (int, float)):
+            if value < 10 and unit not in ["%", "percent"]:
+                continue
+
+        # 3️⃣ Reject if source sentence too short (likely header/numbering)
+        if len(source_text.split()) < 6:
+            continue
+
+        # 4️⃣ Must contain economic keywords
+        economic_keywords = [
+            "firm", "employment", "revenue", "gva",
+            "professional", "office", "growth",
+            "percentage", "investment", "salary",
+            "forecast", "sector", "cyber"
+        ]
+
+        if not any(word in source_text.lower() for word in economic_keywords):
             continue
 
         try:
@@ -74,13 +95,13 @@ def extract_metrics(block_text: str, page_number: int, report_name: str):
 
         validated_metrics.append({
             "report_name": report_name,
-            "metric_name": m.get("metric_name"),
+            "metric_name": metric_name,
             "value": value,
-            "unit": m.get("unit"),
+            "unit": unit,
             "year": m.get("year"),
             "page_number": page_number,
             "source_text": source_text,
-            "confidence_score": 1.0  # exact anchor match
+            "confidence_score": 1.0
         })
 
     return validated_metrics
