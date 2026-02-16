@@ -1,40 +1,39 @@
-from fastapi import APIRouter, UploadFile, File, Query
-from hashlib import sha256
-import os
-from app.core.config import UPLOAD_DIR
-from app.services.pipeline_service import run_pipeline
-from app.tasks import process_pdf  # celery task
+from fastapi import APIRouter, UploadFile, File, Depends
+from sqlalchemy.orm import Session
+from app.dependencies import get_db
+from app.models import Metric
+from app.services.pdf_parser import parse_pdf
+from app.services.recursive_parser import recursive_parse_blocks
+from app.config import USE_CELERY
+from app.workers.tasks import process_pdf_task
+from app.utils.file_utils import save_upload_file, delete_file
+from app.utils.logger import get_logger
 
 router = APIRouter()
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+logger = get_logger("upload")
 
 @router.post("/upload")
-async def upload(
-    file: UploadFile = File(...),
-    celery: bool = Query(False, description="Run pipeline via Celery")
-):
-    content = await file.read()
-    doc_hash = sha256(content).hexdigest()
+async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    file_path = save_upload_file(file)
 
-    path = os.path.join(UPLOAD_DIR, f"{doc_hash}.pdf")
+    logger.info(f"File saved at {file_path}")
 
-    with open(path, "wb") as f:
-        f.write(content)
+    if USE_CELERY:
+        process_pdf_task.delay(file_path, file.filename)
+        return {"status": "Processing in background"}
 
-    if celery:
-        # 🔹 Async background execution
-        process_pdf.delay(path, doc_hash)
-        return {
-            "document_id": doc_hash,
-            "mode": "celery",
-            "status": "processing in background"
-        }
-    else:
-        # 🔹 Direct synchronous execution
-        run_pipeline(path, doc_hash)
-        return {
-            "document_id": doc_hash,
-            "mode": "sync",
-            "status": "completed"
-        }
+    blocks = parse_pdf(file_path)
+    metrics = recursive_parse_blocks(blocks, file.filename)
+
+    for m in metrics:
+        db.add(Metric(**m))
+
+    db.commit()
+    delete_file(file_path)
+
+    logger.info(f"Extraction completed. Metrics: {len(metrics)}")
+
+    return {
+        "status": "Completed",
+        "metrics_extracted": len(metrics)
+    }

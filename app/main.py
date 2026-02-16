@@ -1,12 +1,11 @@
 from fastapi import FastAPI
-from app.api.upload import router as upload_router
-from app.api.dashboard import router as dashboard_router
-from app.db.database import Base, engine
-import app.db.models
-
-app = FastAPI(title="Cyber Intelligence Pipeline")
+from app.database import Base, engine
+from app.api import upload, metrics, export
 
 Base.metadata.create_all(bind=engine)
 
-app.include_router(upload_router)
-app.include_router(dashboard_router)
+app = FastAPI(title="Cyber Metric Extractor")
+
+app.include_router(upload.router)
+app.include_router(metrics.router)
+app.include_router(export.router)
