@@ -22,5 +22,10 @@ CANONICAL_TAXONOMY = {
     "growth_rate": {
         "unit": "percent",
         "category": "growth"
+    },
+    "public_tender_count": {
+        "unit": "count",
+        "category": "government"
     }
+
 }
